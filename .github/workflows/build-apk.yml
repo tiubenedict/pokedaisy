@@ -7,7 +7,8 @@ on:
   push:
 
 permissions:
-  contents: read
+  # write: to publish the APK as the fork's "portrait-latest" release (last step).
+  contents: write
 
 jobs:
   apk:
@@ -55,3 +56,17 @@ jobs:
         with:
           name: PokeDaisy-debug
           path: app/build/outputs/apk/debug/*.apk
+
+      # A plain download link for the phone: the APK as a release on this fork
+      # (artifacts above are zips behind a GitHub sign-in). Replaced on every
+      # build of this branch.
+      - name: Publish release
+        if: github.ref == 'refs/heads/portrait-companion'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/*.apk PokeDaisy-portrait.apk
+          gh release delete portrait-latest --cleanup-tag -y || true
+          gh release create portrait-latest PokeDaisy-portrait.apk --prerelease --target "$GITHUB_SHA" \
+            --title "PokeDaisy portrait (test build)" \
+            --notes "Debug build of the portrait-companion branch ($GITHUB_SHA). Installs next to the official app as com.pokedaisy.app.portrait."
