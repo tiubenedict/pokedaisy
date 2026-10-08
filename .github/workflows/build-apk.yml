@@ -11,21 +11,27 @@ permissions:
 
 jobs:
   apk:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
-
+      # The runner image ships the Android SDK and its command-line tools;
+      # add what this project pins (the NDK and CMake usually aren't there).
       - name: SDK packages
-        run: sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
+        run: |
+          set -o pipefail
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          ls "$ANDROID_HOME" || { echo "::error::No Android SDK at ANDROID_HOME=$ANDROID_HOME"; exit 1; }
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-34" "build-tools;34.0.0" "ndk;28.2.13676358" "cmake;3.22.1" 2>&1 | tail -5 \
+            || { echo "::error::sdkmanager failed"; exit 1; }
 
       - uses: gradle/actions/setup-gradle@v4
 
@@ -36,7 +42,14 @@ jobs:
         run: mkdir -p ~/.android && cp .github/sidebyside-debug.keystore ~/.android/debug.keystore
 
       - name: Build
-        run: ./gradlew :app:assembleDebug -PsideBySide --stacktrace
+        run: |
+          set -o pipefail
+          if ! ./gradlew :app:assembleDebug -PsideBySide --stacktrace 2>&1 | tee build.log; then
+            # The errors as annotations too: they show on the run's summary page.
+            grep -E "^e: |error:|What went wrong|FAILED|Exception" build.log | head -40 | while IFS= read -r l; do echo "::error::$l"; done
+            echo "::error title=build tail::$(tail -30 build.log | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}')"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
