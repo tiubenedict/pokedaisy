@@ -1,0 +1,44 @@
+name: Build APK
+
+# Builds a debug APK you can sideload: Actions tab > Build APK > Run workflow,
+# then download "PokeDaisy-debug" from the finished run's Artifacts.
+on:
+  workflow_dispatch:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: SDK packages
+        run: sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # The same (throwaway, debug-only) key every run, so each new APK installs
+      # over the last one and keeps its saves. A fresh runner would otherwise
+      # sign with a new random debug key.
+      - name: Fixed debug key
+        run: mkdir -p ~/.android && cp .github/sidebyside-debug.keystore ~/.android/debug.keystore
+
+      - name: Build
+        run: ./gradlew :app:assembleDebug -PsideBySide --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PokeDaisy-debug
+          path: app/build/outputs/apk/debug/*.apk

@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ActivityInfo
 import android.graphics.Color
 import android.hardware.display.DisplayManager
 import android.net.Uri
@@ -414,7 +415,7 @@ class PokeDaisyActivity : Activity() {
         root.setViewTreeLifecycleOwner(owner)
         root.setViewTreeSavedStateRegistryOwner(owner)
         root.setViewTreeViewModelStoreOwner(owner)
-        sidePanel = SidePanel(root, view, touchControls, Prefs(this), panelBack, playClick) {
+        sidePanel = SidePanel(root, view, touchControls, Prefs(this), panelBack, playClick, ::portraitBandHeight) {
             val snap by telemetry.snapshot.collectAsState()
             CompanionScreen(snap, stateSlots, companionSettings, battleInput, back = panelBack, clickSound = playClick, achievements = RetroAchievements)
         }
@@ -424,6 +425,8 @@ class PokeDaisyActivity : Activity() {
         hotkeys = Hotkeys.load(getExternalFilesDir(null) ?: filesDir)
         displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         inputManager = getSystemService(Context.INPUT_SERVICE) as android.hardware.input.InputManager
+        // Before the first frame, so a phone held upright doesn't open in landscape first.
+        syncOrientation(secondScreen = Screens.second(this) != null)
 
         rom = resolveRom(intent)
         val r = rom
@@ -493,6 +496,7 @@ class PokeDaisyActivity : Activity() {
                 MgbaCore.pkVideoBuffer()?.let { buf ->
                     runOnUiThread {
                         stage.aspect = w.toFloat() / h   // 3:2, or a Game Boy's 10:9
+                        if (::sidePanel.isInitialized) sidePanel.relayout()   // the portrait band follows it
                         touchControls.shoulders = !gameBoy
                         view.bindCore(buf, w, h)
                     }
@@ -701,6 +705,7 @@ class PokeDaisyActivity : Activity() {
         // One screen: the companion goes in a panel beside the game instead (not
         // with the debug mirror, which already shows it there).
         sidePanel.setEnabled(target == null && !debugMirror)
+        syncOrientation(secondScreen = target != null)
         if (swap) showMainCompanion() else showStage()
         if (target == null) return
         presentation = runCatching {
@@ -757,6 +762,45 @@ class PokeDaisyActivity : Activity() {
         view.stretch = prefs.stretchGame
         view.gbaColors = prefs.gbaColors
         view.screenEffect = ScreenShaders.effectFor(prefs.screenFilter)
+        if (::sidePanel.isInitialized) sidePanel.relayout()
+    }
+
+    /** [SidePanel]'s game band in portrait: the game at full [width], plus the status bar if it's on. */
+    private fun portraitBandHeight(width: Int): Int {
+        val barH = if (statusBar.visibility == View.VISIBLE) {
+            statusBar.measure(
+                View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.AT_MOST),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+            )
+            statusBar.measuredHeight
+        } else 0
+        return (width / stage.aspect).toInt() + barH
+    }
+
+    /**
+     * Landscape only, as the manifest has it - except on a phone (a screen
+     * that's naturally portrait) with no second screen: there the game follows
+     * the phone's rotation, and portrait puts the companion under the game
+     * ([SidePanel]). Handhelds keep their landscape whatever way they're held.
+     * By the sensor, like sensorLandscape: a phone's rotation lock is usually
+     * on, and would otherwise keep the game out of landscape.
+     */
+    private fun syncOrientation(secondScreen: Boolean) {
+        val want = if (!secondScreen && !debugMirror && naturallyPortrait()) {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        }
+        if (requestedOrientation != want) requestedOrientation = want
+    }
+
+    /** The built-in screen is taller than wide at its natural rotation (a phone, not a handheld). */
+    private fun naturallyPortrait(): Boolean {
+        val d = displayManager.getDisplay(Display.DEFAULT_DISPLAY) ?: return false
+        val size = android.graphics.Point()
+        @Suppress("DEPRECATION") d.getRealSize(size)
+        val sideways = d.rotation == android.view.Surface.ROTATION_90 || d.rotation == android.view.Surface.ROTATION_270
+        return if (sideways) size.x > size.y else size.y > size.x
     }
 
     /**

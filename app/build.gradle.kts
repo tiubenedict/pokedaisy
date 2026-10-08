@@ -67,6 +67,15 @@ android {
     }
 
     buildTypes {
+        debug {
+            // `-PsideBySide`: a debug build that installs next to the official
+            // release instead of clashing with its signature.
+            if (project.hasProperty("sideBySide")) {
+                applicationIdSuffix = ".portrait"
+                // A debug build's native core is otherwise -O0: far too slow to play on.
+                externalNativeBuild { cmake { arguments += "-DCMAKE_BUILD_TYPE=Release" } }
+            }
+        }
         release {
             isMinifyEnabled = false
             if (keystoreProps != null) signingConfig = signingConfigs.getByName("release")

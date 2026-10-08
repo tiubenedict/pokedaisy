@@ -2,6 +2,7 @@ package com.pokedaisy.app
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.os.Build
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -37,6 +38,12 @@ import kotlin.math.roundToInt
  * one outside the panel's bottom-left corner closes it, locked or not. While
  * locked, both are see-through ([LOCKED_TAB_ALPHA]) - they sit over the letterbox
  * then. The touch pad stays on the game's side whenever the panel is open.
+ *
+ * Held in portrait (a phone - see [PokeDaisyActivity]'s syncOrientation) it's
+ * the dual-screen layout instead: the game in a band across the top, below
+ * any camera cutout ([portraitBand] tall), and the companion always open under
+ * it at full width, like a bottom screen. No tabs there; BACK is just the
+ * companion's back.
  */
 class SidePanel(
     private val root: FrameLayout,
@@ -45,6 +52,8 @@ class SidePanel(
     private val prefs: Prefs,
     private val back: CompanionBack,
     private val clickSound: () -> Unit,
+    /** The game's band in portrait for a screen [width] wide: the game at full width, plus the status bar. */
+    private val portraitBand: (width: Int) -> Int,
     private val companion: @Composable () -> Unit,
 ) {
     private val context: Context get() = root.context
@@ -61,16 +70,28 @@ class SidePanel(
     private var openTab: View? = null
     private var closeTab: View? = null
     private var lastRootWidth = 0
+    private var lastRootHeight = 0
+    /** Laid out as the portrait bottom panel last time (to restore open/locked on turning back). */
+    private var wasPortrait = false
+
+    /** Taller than wide: the panel is the bottom half (see the class comment). */
+    private val portrait get() = enabled && rootHeight > rootWidth
 
     private val rootWidth get() = root.width.takeIf { it > 0 } ?: context.resources.displayMetrics.widthPixels
     private val rootHeight get() = root.height.takeIf { it > 0 } ?: context.resources.displayMetrics.heightPixels
     private val panelWidth get() = (rootWidth * fraction).roundToInt()
 
-    private val relayout = View.OnLayoutChangeListener { _, l, _, r, _, _, _, _, _ ->
-        if (r - l != lastRootWidth) {
+    private val relayout = View.OnLayoutChangeListener { _, l, t, r, b, _, _, _, _ ->
+        if (r - l != lastRootWidth || b - t != lastRootHeight) {
             lastRootWidth = r - l
+            lastRootHeight = b - t
             root.post { apply() }
         }
+    }
+
+    /** Something above the panel changed size (the status bar went on or off). */
+    fun relayout() {
+        if (enabled) apply()
     }
 
     /** On with no second screen, off when one shows up (the companion moves there). */
@@ -105,8 +126,14 @@ class SidePanel(
                 root.addView(it, at + 3, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.END).apply { bottomMargin = bottom })
             }
             root.addOnLayoutChangeListener(relayout)
+            // Turning upside down moves the camera cutout without resizing anything.
+            root.setOnApplyWindowInsetsListener { v, insets ->
+                if (portrait) v.post { apply() }
+                v.onApplyWindowInsets(insets)
+            }
         } else {
             root.removeOnLayoutChangeListener(relayout)
+            root.setOnApplyWindowInsetsListener(null)
             for (v in listOfNotNull(panel, handle, closeTab, openTab)) root.removeView(v)
             panel = null
             handle = null
@@ -124,6 +151,10 @@ class SidePanel(
     /** A BACK tap; false = not ours (no side panel - the second screen's companion takes it). */
     fun onBack(): Boolean {
         if (!enabled) return false
+        if (portrait) {
+            back.back()
+            return true
+        }
         when {
             !open -> show()
             back.back() -> Unit
@@ -133,7 +164,7 @@ class SidePanel(
     }
 
     private fun show() {
-        if (open) return
+        if (open || portrait) return
         open = true
         apply()
         val w = panelWidth.toFloat()
@@ -144,7 +175,7 @@ class SidePanel(
     }
 
     private fun hide() {
-        if (!open) return
+        if (!open || portrait) return
         open = false
         // The game and the touch pad take the whole screen back now; the panel slides out over them.
         setRightMargin(game, 0)
@@ -174,6 +205,30 @@ class SidePanel(
 
     /** Lays everything out for the current state. */
     private fun apply() {
+        // A slide still running (the phone turned mid-way) would carry on from
+        // here and leave the panel off-screen; cancelled, its end action doesn't run.
+        for (v in listOfNotNull(panel, handle, closeTab)) v.animate().cancel()
+        if (portrait) {
+            wasPortrait = true
+            applyPortrait()
+            return
+        }
+        if (wasPortrait) {
+            // Back to landscape: the panel as it was there - locked beside the game, or closed.
+            wasPortrait = false
+            open = enabled && docked.value
+        }
+        panel?.apply {
+            val lp = layoutParams as FrameLayout.LayoutParams
+            if (lp.height != -1 || lp.gravity != Gravity.END || lp.bottomMargin != 0) {
+                lp.height = -1
+                lp.gravity = Gravity.END
+                lp.bottomMargin = 0
+                layoutParams = lp
+            }
+        }
+        setVerticalMargins(game, 0, 0)
+        setVerticalMargins(touchControls, 0, 0)
         val w = panelWidth
         val shown = enabled && open
         panel?.apply {
@@ -198,6 +253,46 @@ class SidePanel(
         }
         setRightMargin(game, if (shown && docked.value) w else 0)
         setRightMargin(touchControls, if (shown) w else 0)
+    }
+
+    /**
+     * Portrait: the game across the top (under the cutout), the companion
+     * below it at full width, always open; the tabs aren't used.
+     */
+    private fun applyPortrait() {
+        val w = rootWidth
+        val h = rootHeight
+        val cut = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) root.rootWindowInsets?.displayCutout else null
+        val cutout = cut?.safeInsetTop ?: 0
+        val cutoutBottom = cut?.safeInsetBottom ?: 0
+        val band = portraitBand(w).coerceAtMost(((h - cutout) * MAX_PORTRAIT_BAND).roundToInt())
+        val paneH = (h - cutout - band).coerceAtLeast(0)
+        open = true
+        panel?.apply {
+            visibility = View.VISIBLE
+            translationX = 0f
+            val lp = layoutParams as FrameLayout.LayoutParams
+            if (lp.width != -1 || lp.height != paneH - cutoutBottom || lp.gravity != Gravity.BOTTOM || lp.bottomMargin != cutoutBottom) {
+                lp.width = -1
+                lp.height = paneH - cutoutBottom
+                lp.gravity = Gravity.BOTTOM
+                lp.bottomMargin = cutoutBottom
+                layoutParams = lp
+            }
+        }
+        for (v in listOfNotNull(handle, closeTab, openTab)) v.visibility = View.GONE
+        setRightMargin(game, 0)
+        setRightMargin(touchControls, 0)
+        setVerticalMargins(game, cutout, paneH)
+        setVerticalMargins(touchControls, cutout, paneH)
+    }
+
+    private fun setVerticalMargins(v: View, top: Int, bottom: Int) {
+        val lp = v.layoutParams as FrameLayout.LayoutParams
+        if (lp.topMargin == top && lp.bottomMargin == bottom) return
+        lp.topMargin = top
+        lp.bottomMargin = bottom
+        v.layoutParams = lp
     }
 
     private fun setRightMargin(v: View, margin: Int) {
@@ -283,5 +378,7 @@ class SidePanel(
         const val GBA_W = 240
         const val GBA_H = 160
         const val SNAP_PX = 48
+        /** The game's band never takes more of a portrait screen than this. */
+        const val MAX_PORTRAIT_BAND = 0.6f
     }
 }
